@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.30;
+pragma solidity 0.8.28;
 
 import {IPermit2} from "../interfaces/IPermit2.sol";
 

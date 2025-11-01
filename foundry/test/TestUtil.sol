@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.30;
+pragma solidity 0.8.28;
 
 import {IStateView} from "../src/interfaces/IStateView.sol";
 import {PoolId, PoolIdLibrary} from "../src/types/PoolId.sol";

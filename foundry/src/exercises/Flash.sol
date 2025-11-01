@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.30;
+pragma solidity 0.8.28;
 
-// import {console} from "forge-std/Test.sol";
+import {console} from "forge-std/Test.sol";
 
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IPoolManager} from "../interfaces/IPoolManager.sol";
@@ -33,10 +33,32 @@ contract Flash is IUnlockCallback {
         returns (bytes memory)
     {
         // Write your code here
+        // Decode data
+        (address currency, uint256 amount) = abi.decode(data, (address, uint256));
+
+        // Borrow
+        poolManager.take(currency, address(this), amount);
+
+        // Flash loan logic
+        (bool ok, ) = tester.call("");
+        require(ok, "test failed");
+
+        // Repay
+        poolManager.sync(currency);
+
+        if (currency == address(0)) {
+            poolManager.settle{value: amount}();
+        } else {
+            IERC20(currency).transfer(address(poolManager), amount);
+            poolManager.settle();
+        }
+
         return "";
     }
 
     function flash(address currency, uint256 amount) external {
         // Write your code here
+        bytes memory data = abi.encode(currency, amount);
+        poolManager.unlock(data);
     }
 }

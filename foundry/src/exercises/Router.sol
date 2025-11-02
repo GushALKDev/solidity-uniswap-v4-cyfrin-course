@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-// import {console} from "forge-std/Test.sol";
+import {console} from "forge-std/Test.sol";
 
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IPoolManager} from "../interfaces/IPoolManager.sol";
@@ -90,6 +90,134 @@ contract Router is TStore, IUnlockCallback {
     {
         uint256 action = _getAction();
         // Write your code here
+        // Ensure the caller is the PoolManager
+        require(msg.sender == address(poolManager), "Caller is not PoolManager");
+
+        // Handle different actions based on the action type
+        if (action == SWAP_EXACT_IN_SINGLE) {
+            (address caller, ExactInputSingleParams memory params) = abi.decode(data, (address, ExactInputSingleParams));
+        
+            // Execute the swap
+            SwapParams memory swapParams = SwapParams({
+                zeroForOne: params.zeroForOne,
+                amountSpecified: -int256(uint256(params.amountIn)),
+                sqrtPriceLimitX96: params.zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
+            });
+
+            int256 d = poolManager.swap(params.poolKey, swapParams, params.hookData);
+
+            // Extract balance delta
+            BalanceDelta delta = BalanceDelta.wrap(d);
+            int128 amount0 = delta.amount0();
+            int128 amount1 = delta.amount1();
+
+            (
+                address currencyIn,
+                address currencyOut,
+                uint256 amountIn,
+                uint256 amountOut
+            ) = params.zeroForOne
+                ? (
+                    params.poolKey.currency0,
+                    params.poolKey.currency1,
+                    (-amount0).toUint256(),
+                    amount1.toUint256()
+                )
+                : (
+                    params.poolKey.currency1,
+                    params.poolKey.currency0,
+                    (-amount1).toUint256(),
+                    amount0.toUint256()
+                );
+
+            // Ensure the output amount meets the minimum requirement
+            require(amountOut >= params.amountOutMin, "insufficient output amount");
+
+            // Transfer output currency to the caller
+            poolManager.take(currencyOut, caller, amountOut);
+
+            // Sync the input currency
+            poolManager.sync(currencyIn);
+
+            // Transfer input currency from the caller to the pool manager and settle
+            if (currencyIn == address(0)) {
+                poolManager.settle{value: amountIn}();
+            }
+            else {
+                IERC20(currencyIn).transfer(address(poolManager), amountIn);
+                poolManager.settle();
+            }
+
+            return abi.encode(amountOut);
+
+        } else if (action == SWAP_EXACT_OUT_SINGLE) {
+            // Handle SWAP_EXACT_OUT_SINGLE action
+            (address caller, ExactOutputSingleParams memory params) = abi.decode(data, (address, ExactOutputSingleParams));
+        
+            // Execute the swap
+            SwapParams memory swapParams = SwapParams({
+                zeroForOne: params.zeroForOne,
+                amountSpecified: int256(uint256(params.amountOut)),
+                sqrtPriceLimitX96: params.zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
+            });
+
+            int256 d = poolManager.swap(params.poolKey, swapParams, params.hookData);
+
+            // Extract balance delta
+            BalanceDelta delta = BalanceDelta.wrap(d);
+            int128 amount0 = delta.amount0();
+            int128 amount1 = delta.amount1();
+
+            (
+                address currencyIn,
+                address currencyOut,
+                uint256 amountIn,
+                uint256 amountOut
+            ) = params.zeroForOne
+                ? (
+                    params.poolKey.currency0,
+                    params.poolKey.currency1,
+                    (-amount0).toUint256(),
+                    amount1.toUint256()
+                )
+                : (
+                    params.poolKey.currency1,   
+                    params.poolKey.currency0,
+                    (-amount1).toUint256(),
+                    amount0.toUint256()
+                );
+
+            // Ensure the output amount meets the minimum requirement
+            require(amountIn < params.amountInMax, "too much input amount");
+
+            // Transfer output currency to the caller
+            poolManager.take(currencyOut, caller, amountOut);
+
+            // Transfer input currency from the caller to the Router (if not native currency)
+            if (currencyIn != address(0)) {
+                currencyIn.transferIn(caller, amountIn);
+            }
+
+            // Sync the input currency
+            poolManager.sync(currencyIn);
+
+            // Transfer input currency from the caller to the pool manager and settle
+            if (currencyIn == address(0)) {
+                poolManager.settle{value: amountIn}();
+            }
+            else {
+                IERC20(currencyIn).transfer(address(poolManager), amountIn);
+                poolManager.settle();
+            }
+
+            return abi.encode(amountIn);
+
+        } else if (action == SWAP_EXACT_IN) {
+            // Handle SWAP_EXACT_IN action
+        } else if (action == SWAP_EXACT_OUT) {
+            // Handle SWAP_EXACT_OUT action
+        }
+        
         revert UnsupportedAction(action);
     }
 
@@ -100,6 +228,22 @@ contract Router is TStore, IUnlockCallback {
         returns (uint256 amountOut)
     {
         // Write your code here
+        // Determine the input currency based on the swap direction
+        address currencyIn = params.zeroForOne ? params.poolKey.currency0 : params.poolKey.currency1;
+
+        // Transfer the input amount from the sender to the router (if not native currency)
+        if (currencyIn != address(0)) {
+            currencyIn.transferIn(msg.sender, params.amountIn);
+        }
+
+        // Trigger the swap via unlock callback
+        bytes memory res = poolManager.unlock(abi.encode(msg.sender, params));
+        amountOut = abi.decode(res, (uint256));
+
+        // After the swap, transfer any remaining input currency back to the sender
+        if (currencyIn.balanceOf(address(this)) > 0) {
+            currencyIn.transferOut(msg.sender, currencyIn.balanceOf(address(this)));
+        }
     }
 
     function swapExactOutputSingle(ExactOutputSingleParams calldata params)
@@ -109,6 +253,17 @@ contract Router is TStore, IUnlockCallback {
         returns (uint256 amountIn)
     {
         // Write your code here
+        // Determine the input currency based on the swap direction
+        address currencyIn = params.zeroForOne ? params.poolKey.currency0 : params.poolKey.currency1;
+
+        // Trigger the swap via unlock callback
+        bytes memory res = poolManager.unlock(abi.encode(msg.sender, params));
+        amountIn = abi.decode(res, (uint256));
+
+        // After the swap, transfer any remaining input currency back to the sender
+        if (currencyIn.balanceOf(address(this)) > 0) {
+            currencyIn.transferOut(msg.sender, currencyIn.balanceOf(address(this)));
+        }
     }
 
     function swapExactInput(ExactInputParams calldata params)

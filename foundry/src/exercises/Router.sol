@@ -98,117 +98,58 @@ contract Router is TStore, IUnlockCallback {
             (address caller, ExactInputSingleParams memory params) = abi.decode(data, (address, ExactInputSingleParams));
         
             // Execute the swap
-            SwapParams memory swapParams = SwapParams({
-                zeroForOne: params.zeroForOne,
-                amountSpecified: -int256(uint256(params.amountIn)),
-                sqrtPriceLimitX96: params.zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
-            });
+            (int128 amount0, int128 amount1) = _swap({
+                    zeroForOne: params.zeroForOne,
+                    poolKey: params.poolKey,
+                    amountSpecified: -(params.amountIn.toInt256()),
+                    hookData: params.hookData
+                });
 
-            int256 d = poolManager.swap(params.poolKey, swapParams, params.hookData);
-
-            // Extract balance delta
-            BalanceDelta delta = BalanceDelta.wrap(d);
-            int128 amount0 = delta.amount0();
-            int128 amount1 = delta.amount1();
-
-            (
-                address currencyIn,
-                address currencyOut,
-                uint256 amountIn,
-                uint256 amountOut
-            ) = params.zeroForOne
-                ? (
-                    params.poolKey.currency0,
-                    params.poolKey.currency1,
-                    (-amount0).toUint256(),
-                    amount1.toUint256()
-                )
-                : (
-                    params.poolKey.currency1,
-                    params.poolKey.currency0,
-                    (-amount1).toUint256(),
-                    amount0.toUint256()
-                );
+            // Currency determination
+            (address currencyIn, address currencyOut, uint256 amountIn, uint256 amountOut) = params.zeroForOne
+                ? (params.poolKey.currency0, params.poolKey.currency1, (-amount0).toUint256(), amount1.toUint256())
+                : (params.poolKey.currency1, params.poolKey.currency0, (-amount1).toUint256(), amount0.toUint256());
 
             // Ensure the output amount meets the minimum requirement
             require(amountOut >= params.amountOutMin, "insufficient output amount");
 
-            // Transfer output currency to the caller
-            poolManager.take(currencyOut, caller, amountOut);
-
-            // Sync the input currency
-            poolManager.sync(currencyIn);
-
-            // Transfer input currency from the caller to the pool manager and settle
-            if (currencyIn == address(0)) {
-                poolManager.settle{value: amountIn}();
-            }
-            else {
-                IERC20(currencyIn).transfer(address(poolManager), amountIn);
-                poolManager.settle();
-            }
+            _takeAndSettle({
+                caller: caller,
+                currencyIn: currencyIn,
+                amountIn: amountIn,
+                currencyOut: currencyOut,
+                amountOut: amountOut
+            });
 
             return abi.encode(amountOut);
 
         } else if (action == SWAP_EXACT_OUT_SINGLE) {
             // Handle SWAP_EXACT_OUT_SINGLE action
             (address caller, ExactOutputSingleParams memory params) = abi.decode(data, (address, ExactOutputSingleParams));
-        
+
             // Execute the swap
-            SwapParams memory swapParams = SwapParams({
-                zeroForOne: params.zeroForOne,
-                amountSpecified: int256(uint256(params.amountOut)),
-                sqrtPriceLimitX96: params.zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
-            });
+            (int128 amount0, int128 amount1) = _swap({
+                    zeroForOne: params.zeroForOne,
+                    poolKey: params.poolKey,
+                    amountSpecified: (params.amountOut.toInt256()),
+                    hookData: params.hookData
+                });
 
-            int256 d = poolManager.swap(params.poolKey, swapParams, params.hookData);
-
-            // Extract balance delta
-            BalanceDelta delta = BalanceDelta.wrap(d);
-            int128 amount0 = delta.amount0();
-            int128 amount1 = delta.amount1();
-
-            (
-                address currencyIn,
-                address currencyOut,
-                uint256 amountIn,
-                uint256 amountOut
-            ) = params.zeroForOne
-                ? (
-                    params.poolKey.currency0,
-                    params.poolKey.currency1,
-                    (-amount0).toUint256(),
-                    amount1.toUint256()
-                )
-                : (
-                    params.poolKey.currency1,   
-                    params.poolKey.currency0,
-                    (-amount1).toUint256(),
-                    amount0.toUint256()
-                );
-
+            // Currency determination
+            (address currencyIn, address currencyOut, uint256 amountIn, uint256 amountOut) = params.zeroForOne
+                ? (params.poolKey.currency0, params.poolKey.currency1, (-amount0).toUint256(), amount1.toUint256())
+                : (params.poolKey.currency1, params.poolKey.currency0, (-amount1).toUint256(), amount0.toUint256());
+                
             // Ensure the output amount meets the minimum requirement
             require(amountIn < params.amountInMax, "too much input amount");
 
-            // Transfer output currency to the caller
-            poolManager.take(currencyOut, caller, amountOut);
-
-            // Transfer input currency from the caller to the Router (if not native currency)
-            if (currencyIn != address(0)) {
-                currencyIn.transferIn(caller, amountIn);
-            }
-
-            // Sync the input currency
-            poolManager.sync(currencyIn);
-
-            // Transfer input currency from the caller to the pool manager and settle
-            if (currencyIn == address(0)) {
-                poolManager.settle{value: amountIn}();
-            }
-            else {
-                IERC20(currencyIn).transfer(address(poolManager), amountIn);
-                poolManager.settle();
-            }
+            _takeAndSettle({
+                caller: caller,
+                currencyIn: currencyIn,
+                amountIn: amountIn,
+                currencyOut: currencyOut,
+                amountOut: amountOut
+            });
 
             return abi.encode(amountIn);
 
@@ -217,199 +158,121 @@ contract Router is TStore, IUnlockCallback {
             (address caller, ExactInputParams memory params) = abi.decode(data, (address, ExactInputParams));
 
             // Execute the multi-hop swap
-            PathKey[] memory path = params.path;
+            // Get the length of the path
+            uint256 pathLength = params.path.length;
 
             // Initialize variables for the swap loop
             address currencyIn = params.currencyIn;
-            address currencyOut = path[path.length - 1].currency;
-            uint256 amountIn = params.amountIn;
-            uint256 amountOut;
+            int256 amountIn = params.amountIn.toInt256();
 
             // Loop through each hop in the path
-            for (uint256 i = 0; i < path.length; i++) {
+            for (uint256 i = 0; i < pathLength; i++) {
+
                 // Determine the pool key for the current hop
-                PoolKey memory poolKey;
+                PathKey memory path = params.path[i];
 
-                // Determine swap direction
-                bool zeroForOne;
+                (address currency0, address currency1) = currencyIn < path.currency ?
+                    (currencyIn, path.currency) :
+                    (path.currency, currencyIn);
 
-                if (i == 0) {
-                    // First hop: compare with params.currencyIn
-                    zeroForOne = (params.currencyIn < path[i].currency) ? true : false;
+                bool zeroForOne = currency0 == currencyIn;
 
-                    // Define pool key for the first hop
-                    poolKey = PoolKey({
-                        currency0: zeroForOne ? params.currencyIn : path[i].currency,
-                        currency1: zeroForOne ? path[i].currency : params.currencyIn,
-                        fee: path[i].fee,
-                        tickSpacing: path[i].tickSpacing,
-                        hooks: path[i].hooks
+                PoolKey memory poolKey = PoolKey({
+                        currency0: currency0,
+                        currency1: currency1,
+                        fee: path.fee,
+                        tickSpacing: path.tickSpacing,
+                        hooks: path.hooks
                     });
-                } else {
-                    // Subsequent hops: compare with previous path currency
-                    zeroForOne = (path[i-1].currency < path[i].currency) ? true : false;
 
-                    // Define pool key for subsequent hops
-                    poolKey = PoolKey({
-                        currency0: zeroForOne ? path[i-1].currency : path[i].currency,
-                        currency1: zeroForOne ? path[i].currency : path[i-1].currency,
-                        fee: path[i].fee,
-                        tickSpacing: path[i].tickSpacing,
-                        hooks: path[i].hooks
-                    });
-                }
-
-                // Calculate the swap parameters for the current hop
-                SwapParams memory swapParams = SwapParams({
+                // Execute the swap
+                (int128 amount0, int128 amount1) = _swap({
                     zeroForOne: zeroForOne,
-                    amountSpecified: -int256(uint256(amountIn)),
-                    sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
+                    poolKey: poolKey,
+                    amountSpecified: -amountIn,
+                    hookData: path.hookData
                 });
                 
-                // Perform the swap
-                int256 d = poolManager.swap(poolKey, swapParams, "");
-
-                // Extract balance delta
-                BalanceDelta delta = BalanceDelta.wrap(d);
-
-                // Update amountIn for the next hop
-                (amountIn, amountOut) = zeroForOne ? 
-                    ((-delta.amount0()).toUint256(), delta.amount1().toUint256()) :
-                    ((-delta.amount1()).toUint256(), delta.amount0().toUint256());
-                
                 // Set the amountIn of the next hop with the amountOut of the current hop
-                amountIn = amountOut;
+                currencyIn = path.currency;
+                amountIn = (zeroForOne ? amount1 : amount0).toInt256();
             }
 
             // Ensure the output amount meets the minimum requirement
-            require(amountOut >= params.amountOutMin, "insufficient output amount");
+            require(uint256(amountIn) >= uint256(params.amountOutMin), "insufficient output amount");
 
-            // Transfer output currency to the caller
-            poolManager.take(currencyOut, caller, amountOut);
+            // Take and settle
+            _takeAndSettle({
+                caller: caller,
+                currencyIn: params.currencyIn,
+                amountIn: params.amountIn,
+                currencyOut: currencyIn,
+                amountOut: uint256(amountIn)
+            });
 
-            // Sync the input currency
-            poolManager.sync(currencyIn);
-
-            // Transfer input currency from the caller to the pool manager and settle
-            if (currencyIn == address(0)) {
-                poolManager.settle{value: params.amountIn}();
-            }
-            else {
-                IERC20(currencyIn).transfer(address(poolManager), params.amountIn);
-                poolManager.settle();
-            }
-
-            return abi.encode(amountOut);
+            return abi.encode(uint256(amountIn));
 
         } else if (action == SWAP_EXACT_OUT) {
             // Handle SWAP_EXACT_OUT action
-
-            // address currencyOut;
-            // // Last element + currencyOut determines the last pool to swap
-            // // First element + second path element's currency determines the first pool to swap
-            // PathKey[] path;
-            // uint128 amountOut;
-            // uint128 amountInMax;
-
-
-            // struct PathKey {
-            //     address currency;
-            //     uint24 fee;
-            //     int24 tickSpacing;
-            //     address hooks;
-            //     bytes hookData;
-            // }
-
             (address caller, ExactOutputParams memory params) = abi.decode(data, (address, ExactOutputParams));
 
             // Execute the multi-hop swap
-            PathKey[] memory path = params.path;
+            // Get the length of the path
+            uint256 pathLength = params.path.length;
 
             // Initialize variables for the swap loop
             address currencyOut = params.currencyOut;
-            address currencyIn = path[0].currency;
-            uint256 amountOut = params.amountOut;
-            uint256 amountIn;
+            int256 amountOut = params.amountOut.toInt256();
 
             // Loop through each hop in the path
-            for (uint256 i = path.length; i > 0; i--) {
+            for (uint256 i = pathLength; i > 0; i--) {
+
                 // Determine the pool key for the current hop
-                PoolKey memory poolKey;
+                PathKey memory path = params.path[i-1];
 
-                // Determine swap direction
-                bool zeroForOne;
+                (address currency0, address currency1) = path.currency < currencyOut ?
+                    (path.currency, currencyOut) :
+                    (currencyOut, path.currency);
 
-                if (i == path.length) {
-                    // First hop: compare with params.currencyIn
-                    zeroForOne = (path[i-1].currency < currencyOut) ? true : false;
+                bool zeroForOne = currencyOut == currency1;
 
-                    // Define pool key for the first hop
-                    poolKey = PoolKey({
-                        currency0: zeroForOne ? path[i-1].currency : params.currencyOut,
-                        currency1: zeroForOne ? params.currencyOut : path[i-1].currency,
-                        fee: path[i-1].fee,
-                        tickSpacing: path[i-1].tickSpacing,
-                        hooks: path[i-1].hooks
+                PoolKey memory poolKey = PoolKey({
+                        currency0: currency0,
+                        currency1: currency1,
+                        fee: path.fee,
+                        tickSpacing: path.tickSpacing,
+                        hooks: path.hooks
                     });
-                } else {
-                    // Subsequent hops: compare with previous path currency
-                    zeroForOne = (path[i-1].currency < path[i].currency) ? true : false;
 
-                    // Define pool key for subsequent hops
-                    poolKey = PoolKey({
-                        currency0: zeroForOne ? path[i-1].currency : path[i].currency,
-                        currency1: zeroForOne ? path[i].currency : path[i-1].currency,
-                        fee: path[i-1].fee,
-                        tickSpacing: path[i-1].tickSpacing,
-                        hooks: path[i-1].hooks
-                    });
-                }
-
-                // Calculate the swap parameters for the current hop
-                SwapParams memory swapParams = SwapParams({
+                // Execute the swap
+                (int128 amount0, int128 amount1) = _swap({
                     zeroForOne: zeroForOne,
-                    amountSpecified: int256(uint256(amountOut)),
-                    sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
+                    poolKey: poolKey,
+                    amountSpecified: amountOut,
+                    hookData: path.hookData
                 });
                 
-                // Perform the swap
-                int256 d = poolManager.swap(poolKey, swapParams, "");
-
-                // Extract balance delta
-                BalanceDelta delta = BalanceDelta.wrap(d);
-
-                // Update amountIn for the next hop
-                (amountIn, amountOut) = zeroForOne ? 
-                    ((-delta.amount0()).toUint256(), delta.amount1().toUint256()) :
-                    ((-delta.amount1()).toUint256(), delta.amount0().toUint256());
-                
                 // Set the amountOut of the next hop with the amountIn of the current hop
-                amountOut = amountIn;
+                currencyOut = path.currency;
+                amountOut = (zeroForOne ? -amount0 : -amount1).toInt256();
             }
 
-            // Ensure the output amount meets the minimum requirement
-            require(amountIn <= params.amountInMax, "too much input amount");
+            // Ensure the input amount meets the maximum requirement
+            require(uint256(amountOut) <= uint256(params.amountInMax), "amount in > max");
 
-            // Transfer output currency to the caller
-            poolManager.take(currencyOut, caller, params.amountOut);
+            // Transfer input currency from caller to router if not native currency
+            if (currencyOut != address(0)) currencyOut.transferIn(caller, uint256(amountOut));
 
-            // Transfer input currency from the caller to the Router (if not native currency)
-            if (currencyIn != address(0)) {
-                currencyIn.transferIn(caller, amountIn);
-            }
-            
-            // Sync the input currency
-            poolManager.sync(currencyIn);
+            // Take and settle
+            _takeAndSettle({
+                caller: caller,
+                currencyIn: currencyOut,
+                amountIn: uint256(amountOut),
+                currencyOut: params.currencyOut,
+                amountOut: params.amountOut
+            });
 
-            // Transfer input currency from the caller to the pool manager and settle
-            if (currencyIn == address(0)) {
-                poolManager.settle{value: amountIn}();
-            }
-            else {
-                IERC20(currencyIn).transfer(address(poolManager), amountIn);
-                poolManager.settle();
-            }
-            return abi.encode(amountIn);
+            return abi.encode(uint256(amountOut));
         }
         
         revert UnsupportedAction(action);
@@ -450,13 +313,17 @@ contract Router is TStore, IUnlockCallback {
         // Determine the input currency based on the swap direction
         address currencyIn = params.zeroForOne ? params.poolKey.currency0 : params.poolKey.currency1;
 
-        // Trigger the swap via unlock callback
+        // Transfer the max input amount from the sender to the router first
+        currencyIn.transferIn(msg.sender, params.amountInMax);
+        
+        // Trigger the swap via unlock callback and decode the actual amount used
         bytes memory res = poolManager.unlock(abi.encode(msg.sender, params));
         amountIn = abi.decode(res, (uint256));
 
-        // After the swap, transfer any remaining input currency back to the sender
-        if (currencyIn.balanceOf(address(this)) > 0) {
-            currencyIn.transferOut(msg.sender, currencyIn.balanceOf(address(this)));
+        // Refund any remaining input currency back to the sender
+        uint256 refunded = currencyIn.balanceOf(address(this));
+        if (refunded > 0) {
+            currencyIn.transferOut(msg.sender, refunded);
         }
     }
 
@@ -502,6 +369,53 @@ contract Router is TStore, IUnlockCallback {
         // After the swap, transfer any remaining input currency back to the sender
         if (currencyIn.balanceOf(address(this)) > 0) {
             currencyIn.transferOut(msg.sender, currencyIn.balanceOf(address(this)));
+        }
+    }
+
+    function _swap(
+        bool zeroForOne,
+        PoolKey memory poolKey,
+        int256 amountSpecified,
+        bytes memory hookData
+    ) internal returns (int128 amountIn, int128 amountOut) {
+        // Calculate the swap parameters for the current hop
+        SwapParams memory swapParams = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: amountSpecified,
+            sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_PRICE + 1 : MAX_SQRT_PRICE - 1
+        });
+        
+        // Perform the swap
+        int256 d = poolManager.swap(poolKey, swapParams, hookData);
+
+        // Extract balance delta
+        BalanceDelta delta = BalanceDelta.wrap(d);
+
+        // Update amountIn for the next hop
+        return (delta.amount0(), delta.amount1());
+    }
+
+    function _takeAndSettle(
+        address caller,
+        uint256 amountIn,
+        address currencyIn,
+        address currencyOut,
+        uint256 amountOut
+    ) internal {
+
+        // Transfer output currency to the caller
+        poolManager.take(currencyOut, caller, amountOut);
+
+        // Sync the input currency
+        poolManager.sync(currencyIn);
+
+        // Transfer input currency from the caller to the pool manager and settle
+        if (currencyIn == address(0)) {
+            poolManager.settle{value: amountIn}();
+        }
+        else {
+            IERC20(currencyIn).transfer(address(poolManager), amountIn);
+            poolManager.settle();
         }
     }
 }

@@ -59,6 +59,487 @@ The `LimitOrder.sol` hook implements a fully-featured limit order system by:
 - **Order Execution**: Automatic via afterSwap hook
 - **Gas Optimization**: Shared buckets, slot-based segregation
 
+## 🔄 Execution Flow: Uniswap V4 ↔ LimitOrder Hook
+
+Understanding how Uniswap V4 interacts with hooks is crucial. Let's visualize the complete execution flow for each operation.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                           USER                                  │
+│                  (Wallet / Frontend)                            │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         │ Calls functions
+                         ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    LIMITORDER CONTRACT                          │
+│                        (The Hook)                               │
+│                                                                 │
+│  Public Functions:                                              │
+│  • place(key, tick, zeroForOne, liquidity)                      │
+│  • cancel(key, tick, zeroForOne)                                │
+│  • take(key, tick, zeroForOne)                                  │
+│                                                                 │
+│  Hook Callbacks (called by PoolManager):                        │
+│  • afterInitialize(...)                                         │
+│  • afterSwap(...)                                               │
+│  • unlockCallback(data)                                         │
+└────────────────────────┬───────────────────────────────────────┘
+                         │
+                         │ Calls unlock() / modifyLiquidity()
+                         ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                      POOL MANAGER                               │
+│                   (Uniswap V4 Core)                             │
+│                                                                 │
+│  Core Functions:                                                │
+│  • unlock(data) → triggers unlockCallback()                     │
+│  • modifyLiquidity(key, params, hookData)                       │
+│  • swap(key, params, hookData) → triggers afterSwap()           │
+│  • initialize(key, sqrtPriceX96) → triggers afterInitialize()   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Flow 1: Placing a Limit Order
+
+```
+USER                  LIMITORDER HOOK              POOLMANAGER
+ │                           │                           │
+ │  place(key, tick,         │                           │
+ │        zeroForOne, liq)   │                           │
+ │──────────────────────────>│                           │
+ │                           │                           │
+ │                           │ [Step 1: Validate tick]   │
+ │                           │ tickLower % tickSpacing == 0?
+ │                           │ ✅                        │
+ │                           │                           │
+ │                           │ [Step 2: Encode data]     │
+ │                           │ data = abi.encode(        │
+ │                           │   sender, value, key,     │
+ │                           │   tick, zeroForOne, liq)  │
+ │                           │                           │
+ │                           │  unlock(data)             │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │                           │ [PoolManager locks]
+ │                           │                           │ 
+ │                           │  unlockCallback(data)     │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │ [Step 3: Inside callback] │
+ │                           │ Decode data               │
+ │                           │ Validate tick != current  │
+ │                           │                           │
+ │                           │  modifyLiquidity(key,     │
+ │                           │    tickLower, tickUpper,  │
+ │                           │    +liquidityDelta)       │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │                           │ [Add liquidity to pool]
+ │                           │                           │ 
+ │                           │  BalanceDelta             │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │ [Step 4: Settle payment]  │
+ │                           │ Extract amount needed     │
+ │                           │ from BalanceDelta         │
+ │                           │                           │
+ │                           │  sync(currency)           │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │ Transfer tokens to PM     │
+ │                           │ (ETH or ERC20)            │
+ │                           │                           │
+ │                           │  settle()                 │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │  return ""                │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │                           │ [PoolManager unlocks]
+ │                           │  (unlock returns)         │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │ [Step 5: Update bucket]   │
+ │                           │ bucketId = getBucketId()  │
+ │                           │ slot = slots[bucketId]    │
+ │                           │ bucket.liquidity += liq   │
+ │                           │ bucket.sizes[user] += liq │
+ │                           │                           │
+ │                           │ [Step 6: Emit event]      │
+ │                           │ emit Place(...)           │
+ │                           │                           │
+ │  ✅ Transaction success   │                           │
+ │<──────────────────────────│                           │
+ │                           │                           │
+```
+
+**Key Points**:
+1. Hook validates tick spacing BEFORE calling PoolManager
+2. `unlock()` creates a "locked context" where callbacks execute
+3. Inside `unlockCallback()`, hook adds liquidity via `modifyLiquidity()`
+4. Hook handles payment (ETH or ERC20) via `sync()` + `settle()`
+5. Only AFTER unlock returns does hook update its own state (buckets)
+
+### Flow 2: Swap Triggers Order Fill (afterSwap)
+
+```
+TRADER                 POOLMANAGER              LIMITORDER HOOK
+ │                           │                           │
+ │  swap(key, params,        │                           │
+ │       hookData)           │                           │
+ │──────────────────────────>│                           │
+ │                           │                           │
+ │                           │ [Execute swap internally] │
+ │                           │ Price moves from tick A   │
+ │                           │ to tick B                 │
+ │                           │                           │
+ │                           │ [After swap completes]    │
+ │                           │  afterSwap(sender, key,   │
+ │                           │    params, delta, data)   │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │                           │ [Step 1: Check if tick moved]
+ │                           │                           │ Get current tick
+ │                           │                           │ Compare with previous tick
+ │                           │                           │ 
+ │                           │                           │ [Step 2: If moved, find range]
+ │                           │                           │ tickLower, tickUpper = 
+ │                           │                           │   _getTickRange(prev, current)
+ │                           │                           │ 
+ │                           │                           │ [Step 3: Loop through ticks]
+ │                           │                           │ for tick in range:
+ │                           │                           │   
+ │                           │                           │ [Step 4: Find buckets]
+ │                           │                           │   bucketId = getBucketId(
+ │                           │                           │     pool, tick, !zeroForOne)
+ │                           │                           │   slot = slots[bucketId]
+ │                           │                           │   bucket = buckets[id][slot]
+ │                           │                           │   
+ │                           │                           │ [Step 5: If has liquidity]
+ │                           │                           │   if bucket.liquidity > 0:
+ │                           │                           │     
+ │                           │  modifyLiquidity(key,     │
+ │                           │    tick, tick+spacing,    │
+ │                           │    -bucket.liquidity)     │ ← Remove liquidity
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │  BalanceDelta (amounts)   │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │                           │ [Step 6: Fill bucket]
+ │                           │                           │     bucket.filled = true
+ │                           │                           │     bucket.amount0 = ...
+ │                           │                           │     bucket.amount1 = ...
+ │                           │                           │     
+ │                           │                           │ [Step 7: Increment slot]
+ │                           │                           │     slots[bucketId]++
+ │                           │                           │     
+ │                           │                           │ [Step 8: Emit Fill event]
+ │                           │                           │     emit Fill(...)
+ │                           │                           │ 
+ │                           │ [Step 9: Update tick]     │
+ │                           │                           │ ticks[poolId] = current
+ │                           │                           │ 
+ │                           │  return selector          │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │  ✅ Swap complete +       │                           │
+ │     orders filled         │                           │
+ │<──────────────────────────│                           │
+ │                           │                           │
+```
+
+**Key Points**:
+1. PoolManager calls `afterSwap()` AFTER the swap executes
+2. Hook detects price movement by comparing ticks
+3. Hook removes liquidity from filled orders via `modifyLiquidity()`
+4. Multiple orders can fill in single swap (loop through ticks)
+5. Slot increments to separate filled orders from new ones
+
+### Flow 3: Canceling an Order
+
+```
+USER                  LIMITORDER HOOK              POOLMANAGER
+ │                           │                           │
+ │  cancel(key, tick,        │                           │
+ │         zeroForOne)       │                           │
+ │──────────────────────────>│                           │
+ │                           │                           │
+ │                           │ [Step 1: Find bucket]     │
+ │                           │ bucketId = getBucketId()  │
+ │                           │ slot = slots[bucketId]    │
+ │                           │ bucket = buckets[id][slot]│
+ │                           │                           │
+ │                           │ [Step 2: Validate]        │
+ │                           │ require(!bucket.filled)   │
+ │                           │ ✅                        │
+ │                           │                           │
+ │                           │ [Step 3: Get user's size] │
+ │                           │ userLiq = bucket.sizes    │
+ │                           │           [msg.sender]    │
+ │                           │ require(userLiq > 0)      │
+ │                           │                           │
+ │                           │ [Step 4: Update bucket]   │
+ │                           │ bucket.liquidity -= userLiq│
+ │                           │ bucket.sizes[user] = 0    │
+ │                           │                           │
+ │                           │ [Step 5: Encode data]     │
+ │                           │ data = abi.encode(        │
+ │                           │   key, tick, userLiq)     │
+ │                           │                           │
+ │                           │  unlock(data)             │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │  unlockCallback(data)     │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │ [Step 6: Inside callback] │
+ │                           │ action = REMOVE_LIQUIDITY │
+ │                           │                           │
+ │                           │  modifyLiquidity(key,     │
+ │                           │    tick, tick+spacing,    │
+ │                           │    -userLiq)              │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │  (delta, fees)            │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │ [Step 7: Take tokens]     │
+ │                           │  take(currency0, amount0) │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │  take(currency1, amount1) │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │  return encoded amounts   │
+ │                           │──────────────────────────>│
+ │                           │                           │
+ │                           │                           │ [PoolManager unlocks]
+ │                           │  (unlock returns)         │
+ │                           │<──────────────────────────│
+ │                           │                           │
+ │                           │ [Step 8: Decode amounts]  │
+ │                           │ (amt0, amt1, fee0, fee1)  │
+ │                           │ = abi.decode(res)         │
+ │                           │                           │
+ │                           │ [Step 9: Fee distribution]│
+ │                           │ if (bucket.liq > 0):      │
+ │                           │   // Keep fees in bucket  │
+ │                           │   bucket.amount0 += fee0  │
+ │                           │   transfer amt0-fee0      │
+ │                           │ else:                     │
+ │                           │   // Last canceler gets all│
+ │                           │   transfer amt0+accum fees│
+ │                           │                           │
+ │                           │ [Step 10: Emit event]     │
+ │                           │ emit Cancel(...)          │
+ │                           │                           │
+ │  ✅ Tokens returned       │                           │
+ │<──────────────────────────│                           │
+ │                           │                           │
+```
+
+**Key Points**:
+1. Hook validates and updates bucket state BEFORE calling PoolManager
+2. `unlockCallback()` removes liquidity and takes tokens back
+3. Fee distribution logic: last canceler gets accumulated fees
+4. Token transfers happen via `take()` (PoolManager → Hook → User)
+
+### Flow 4: Claiming Filled Order (take)
+
+```
+USER                  LIMITORDER HOOK              POOLMANAGER
+ │                           │                           │
+ │  take(key, tick,          │                           │
+ │       zeroForOne)         │                           │
+ │──────────────────────────>│                           │
+ │                           │                           │
+ │                           │ [Step 1: Find bucket]     │
+ │                           │ bucketId = getBucketId()  │
+ │                           │ slot = slots[bucketId]    │
+ │                           │ bucket = buckets[id][slot]│
+ │                           │                           │
+ │                           │ [Step 2: Validate filled] │
+ │                           │ require(bucket.filled)    │
+ │                           │ ✅                        │
+ │                           │                           │
+ │                           │ [Step 3: Calculate share] │
+ │                           │ size = bucket.sizes[user] │
+ │                           │ require(size > 0)         │
+ │                           │                           │
+ │                           │ amount0 = (bucket.amount0 │
+ │                           │   * size) / bucket.liq    │
+ │                           │                           │
+ │                           │ amount1 = (bucket.amount1 │
+ │                           │   * size) / bucket.liq    │
+ │                           │                           │
+ │                           │ [Step 4: Update bucket]   │
+ │                           │ bucket.liquidity -= size  │
+ │                           │ bucket.amount0 -= amount0 │
+ │                           │ bucket.amount1 -= amount1 │
+ │                           │ bucket.sizes[user] = 0    │
+ │                           │                           │
+ │                           │ [Step 5: Transfer tokens] │
+ │                           │ // Direct transfers       │
+ │                           │ // (not via PoolManager)  │
+ │                           │                           │
+ │                           │ if (amount0 > 0):         │
+ │                           │   currency0.transferOut(  │
+ │                           │     user, amount0)        │
+ │                           │                           │
+ │                           │ if (amount1 > 0):         │
+ │                           │   currency1.transferOut(  │
+ │                           │     user, amount1)        │
+ │                           │                           │
+ │                           │ [Step 6: Emit event]      │
+ │                           │ emit Take(...)            │
+ │                           │                           │
+ │  ✅ Proceeds received     │                           │
+ │<──────────────────────────│                           │
+ │                           │                           │
+```
+
+**Key Points**:
+1. `take()` does NOT use PoolManager (no unlock needed)
+2. Tokens are already in the hook contract (from afterSwap)
+3. Proportional distribution based on user's share
+4. Pure accounting operation on bucket state
+
+### State Transitions: Bucket Lifecycle
+
+```
+                    ┌─────────────────┐
+                    │   NEW BUCKET    │
+                    │  (Empty Slot)   │
+                    │                 │
+                    │ filled: false   │
+                    │ liquidity: 0    │
+                    │ amounts: 0      │
+                    └────────┬────────┘
+                             │
+                             │ place() calls
+                             ↓
+                    ┌─────────────────┐
+                    │ ACTIVE BUCKET   │
+                    │  (Accumulating) │
+                    │                 │
+                    │ filled: false   │
+                    │ liquidity: X    │ ← Growing
+                    │ sizes: {users}  │ ← Multiple users
+                    └────┬───────┬────┘
+                         │       │
+             cancel() ←──┘       └──→ Price crosses
+                 │                        │
+                 ↓                        ↓
+        ┌─────────────────┐      ┌─────────────────┐
+        │ Remove liquidity│      │ FILLED BUCKET   │
+        │ Return tokens   │      │  (Executed)     │
+        │ Distribute fees │      │                 │
+        └─────────────────┘      │ filled: true    │
+                                 │ liquidity: X    │
+                                 │ amounts: Y,Z    │ ← Has proceeds
+                                 └────────┬────────┘
+                                          │
+                                          │ take() calls
+                                          ↓
+                                 ┌─────────────────┐
+                                 │ CLAIMED BUCKET  │
+                                 │   (Depleted)    │
+                                 │                 │
+                                 │ filled: true    │
+                                 │ liquidity: 0    │ ← All claimed
+                                 │ amounts: 0      │ ← All distributed
+                                 └─────────────────┘
+```
+
+### Critical Concepts: The Unlock Pattern
+
+**Why does Uniswap V4 use unlock()?**
+
+```solidity
+// Traditional approach (Uniswap V2/V3):
+function swap() external {
+    // Direct token transfers
+    // Direct state changes
+    // Multiple external calls
+    // Hard to compose
+}
+
+// Uniswap V4 approach:
+function swap() external {
+    poolManager.unlock(data);  // Locks state
+    // ↓
+    // unlockCallback(data) executes
+    //   - Can make multiple operations
+    //   - Can interact with other contracts
+    //   - All within locked context
+    // ↓
+    // Unlock returns, state consistent
+}
+```
+
+**Benefits**:
+1. **Atomic Operations**: All changes happen together or revert
+2. **Composability**: Multiple operations in single transaction
+3. **Gas Efficiency**: Batch operations, single state update
+4. **Flash Accounting**: Internal deltas, settle at end
+
+**In LimitOrder context**:
+```
+place():
+  unlock() {
+    unlockCallback() {
+      modifyLiquidity()  ← Add to pool
+      sync()            ← Prepare payment
+      settle()          ← Finalize payment
+    }
+  }
+  // Everything succeeded or all reverted
+```
+
+### Hook Permissions and Lifecycle
+
+```
+Pool Creation/Initialization:
+  
+  initialize() called on PoolManager
+         ↓
+  PoolManager checks hook permissions
+         ↓
+  If AFTER_INITIALIZE_FLAG is set:
+         ↓
+  afterInitialize() called on hook
+         ↓
+  Hook stores initial tick
+  
+
+Every Swap:
+  
+  swap() called on PoolManager
+         ↓
+  PoolManager executes swap
+         ↓
+  Price moves, liquidity consumed
+         ↓
+  If AFTER_SWAP_FLAG is set:
+         ↓
+  afterSwap() called on hook
+         ↓
+  Hook checks for crossed ticks
+         ↓
+  If ticks crossed:
+    - Remove limit order liquidity
+    - Mark buckets as filled
+    - Increment slots
+```
+
+This execution flow ensures that limit orders automatically execute when the price reaches the specified level, all within the Uniswap V4 framework.
+
+---
+
 ## Understanding Limit Orders in AMMs
 
 ### Traditional Limit Orders vs AMM Limit Orders

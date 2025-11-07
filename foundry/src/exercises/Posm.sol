@@ -77,6 +77,38 @@ contract PosmExercises {
         uint128 amount1Max
     ) external payable {
         // Write your code here
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.INCREASE_LIQUIDITY),
+            uint8(Actions.SETTLE_PAIR),
+            uint8(Actions.SWEEP) // Recover leftover ETH
+        );
+
+        bytes[] memory params = new bytes[](3);
+
+        // INCREASE_LIQUIDITY params
+        params[0] = abi.encode(
+            tokenId,
+            liquidity,
+            amount0Max,
+            amount1Max,
+            "" // hook data
+        );
+
+        // SETTLE_PAIR params
+        (PoolKey memory poolKey, ) = posm.getPoolAndPositionInfo(tokenId);
+        params[1] = abi.encode(
+            poolKey.currency0, 
+            poolKey.currency1
+        );
+
+        // SWEEP params
+        params[2] = abi.encode(address(0), address(this));
+
+        // Call modifyLiquidities
+        posm.modifyLiquidities{value: address(this).balance}(
+            abi.encode(actions, params), 
+            block.timestamp + 300
+        );
     }
 
     function decreaseLiquidity(
@@ -86,11 +118,68 @@ contract PosmExercises {
         uint128 amount1Min
     ) external {
         // Write your code here
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.DECREASE_LIQUIDITY),
+            uint8(Actions.TAKE_PAIR)
+        );
+
+        bytes[] memory params = new bytes[](2);
+
+        // INCREASE_LIQUIDITY params
+        params[0] = abi.encode(
+            tokenId,
+            liquidity,
+            amount0Min,
+            amount1Min,
+            "" // hook data
+        );
+
+        // TAKE_PAIR params
+        (PoolKey memory poolKey, ) = posm.getPoolAndPositionInfo(tokenId);
+        params[1] = abi.encode(
+            poolKey.currency0, 
+            poolKey.currency1,
+            address(this) // to
+        );
+
+        // Call modifyLiquidities
+        posm.modifyLiquidities(
+            abi.encode(actions, params), 
+            block.timestamp + 300
+        );
     }
 
     function burn(uint256 tokenId, uint128 amount0Min, uint128 amount1Min)
         external
     {
         // Write your code here
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.BURN_POSITION),
+            uint8(Actions.TAKE_PAIR)
+        );
+
+        bytes[] memory params = new bytes[](2);
+
+        // BURN_POSITION params
+        params[0] = abi.encode(
+            tokenId,
+            amount0Min,
+            amount1Min,
+            "" // hook data
+        );
+
+        // TAKE_PAIR params
+        (PoolKey memory poolKey, ) = posm.getPoolAndPositionInfo(tokenId);
+        params[1] = abi.encode(
+            poolKey.currency0, 
+            poolKey.currency1,
+            address(this) // to
+        );
+
+        // Call modifyLiquidities
+        posm.modifyLiquidities(
+            abi.encode(actions, params), 
+            block.timestamp + 300
+        );
     }
 }

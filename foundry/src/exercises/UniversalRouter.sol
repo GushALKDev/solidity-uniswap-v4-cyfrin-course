@@ -23,14 +23,58 @@ contract UniversalRouterExercises {
         bool zeroForOne
     ) external payable {
         // Write your code here
+        // Set currencyIn and currencyOut based on swap direction
+        (address currencyIn, address currencyOut) = zeroForOne
+            ? (key.currency0, key.currency1)
+            : (key.currency1, key.currency0);
+
+        // Transfer tokens from user to this contract
+        transferFrom(currencyIn, msg.sender, uint256(amountIn));
+
+        // Approve Permit2 to spend tokens
+        if (currencyIn != address(0)) {
+            approve(currencyIn, uint160(amountIn), type(uint48).max);
+        }
 
         // UniversalRouter inputs
-        bytes memory commands;
+        bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));
         bytes[] memory inputs = new bytes[](1);
 
-        // V4 actions and params
-        bytes memory actions;
+        // V4 actions and parameters
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.SWAP_EXACT_IN_SINGLE),
+            uint8(Actions.SETTLE_ALL),
+            uint8(Actions.TAKE_ALL)
+        );
+
         bytes[] memory params = new bytes[](3);
+
+        // SWAP_EXACT_IN_SINGLE
+        params[0] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: key,
+                zeroForOne: zeroForOne,
+                amountIn: amountIn,
+                amountOutMinimum: amountOutMin,
+                hookData: bytes("")
+            })
+        );
+
+        // SETTLE_ALL (currency, max amount)
+        params[1] = abi.encode(currencyIn, uint256(amountIn));
+
+        // TAKE_ALL (currency, min amount)
+        params[2] = abi.encode(currencyOut, uint256(amountOutMin));
+
+        // Set the inputs for the UniversalRouter
+        inputs[0] = abi.encode(actions, params);
+
+        // Execute the swap via UniversalRouter
+        router.execute{value: msg.value}(commands, inputs, block.timestamp);
+
+        // Withdraw any remaining tokens to user
+        withdraw(key.currency0, msg.sender);
+        withdraw(key.currency1, msg.sender);
     }
 
     function approve(address token, uint160 amount, uint48 expiration)

@@ -289,7 +289,515 @@ User → approve Permit2 (once) → approve spender via Permit2 → spender pull
 Benefit: Same Permit2 approval works for all future contracts
 ```
 
-## 📝 Function Implementation Guide
+
+## Universal Router Commands Reference
+
+The Universal Router supports multiple commands for different operations. Here's the complete reference:
+
+### Command Categories
+
+Commands are organized in groups based on their function type:
+
+```
+0x00 - 0x07: V3 Swaps and Token Management
+0x08 - 0x0f: V2 Swaps and Utilities  
+0x10 - 0x20: V4 Operations and Position Management
+0x21 - 0x3f: Advanced Features and Sub-Plans
+```
+
+### Complete Command List
+
+#### Group 1: V3 and Token Operations (0x00 - 0x07)
+
+##### 0x00: V3_SWAP_EXACT_IN
+
+Execute exact input swap on Uniswap V3
+
+**Parameters**:
+```solidity
+abi.encode(
+    address recipient,      // Who receives output tokens
+    uint256 amountIn,       // Exact amount of input token
+    uint256 amountOutMin,   // Minimum output (slippage protection)
+    bytes path,             // Encoded path: token0, fee, token1, fee, token2...
+    bool payerIsUser        // true = pull from msg.sender, false = use contract balance
+)
+```
+
+**Example**:
+```solidity
+bytes memory commands = abi.encodePacked(uint8(Commands.V3_SWAP_EXACT_IN));
+bytes[] memory inputs = new bytes[](1);
+inputs[0] = abi.encode(
+    msg.sender,             // Recipient
+    1e18,                   // 1 token in
+    0.95e18,                // At least 0.95 tokens out
+    path,                   // V3 encoded path
+    true                    // Pull from user
+);
+router.execute(commands, inputs, deadline);
+```
+
+##### 0x01: V3_SWAP_EXACT_OUT
+
+Execute exact output swap on Uniswap V3
+
+**Parameters**:
+```solidity
+abi.encode(
+    address recipient,      // Who receives output tokens
+    uint256 amountOut,      // Exact amount of output token desired
+    uint256 amountInMax,    // Maximum input willing to pay
+    bytes path,             // Encoded path (reversed for exact out)
+    bool payerIsUser        // true = pull from msg.sender, false = use contract balance
+)
+```
+
+##### 0x02: PERMIT2_TRANSFER_FROM
+
+Transfer tokens from user via Permit2
+
+**Parameters**:
+```solidity
+abi.encode(
+    address token,          // Token to transfer
+    address recipient,      // Who receives tokens
+    uint160 amount          // Amount to transfer
+)
+```
+
+**Use Case**: Pull tokens from user without requiring direct approval to your contract
+
+##### 0x03: PERMIT2_PERMIT_BATCH
+
+Batch permit signature verification for multiple tokens
+
+**Parameters**:
+```solidity
+abi.encode(
+    IAllowanceTransfer.PermitBatch permitBatch,
+    bytes signature         // User's signature
+)
+
+// PermitBatch structure:
+struct PermitBatch {
+    PermitDetails[] details;
+    address spender;
+    uint256 sigDeadline;
+}
+
+struct PermitDetails {
+    address token;
+    uint160 amount;
+    uint48 expiration;
+    uint48 nonce;
+}
+```
+
+##### 0x04: SWEEP
+
+Sweep all tokens from contract to recipient (minimum threshold)
+
+**Parameters**:
+```solidity
+abi.encode(
+    address token,          // Token to sweep (address(0) for ETH)
+    address recipient,      // Who receives swept tokens
+    uint160 amountMin       // Minimum amount required to sweep
+)
+```
+
+**Use Case**: Clean up leftover tokens after operations
+
+##### 0x05: TRANSFER
+
+Transfer exact amount of tokens
+
+**Parameters**:
+```solidity
+abi.encode(
+    address token,          // Token to transfer (address(0) for ETH)
+    address recipient,      // Who receives tokens
+    uint256 value           // Exact amount to transfer
+)
+```
+
+##### 0x06: PAY_PORTION
+
+Pay a percentage (in basis points) of contract's token balance
+
+**Parameters**:
+```solidity
+abi.encode(
+    address token,          // Token to pay
+    address recipient,      // Who receives payment
+    uint256 bips            // Basis points (100 bips = 1%)
+)
+```
+
+**Example**: Pay 50% of balance: `bips = 5000`
+
+#### Group 2: V2 and Utilities (0x08 - 0x0f)
+
+##### 0x08: V2_SWAP_EXACT_IN
+
+Execute exact input swap on Uniswap V2
+
+**Parameters**:
+```solidity
+abi.encode(
+    address recipient,      // Who receives output tokens
+    uint256 amountIn,       // Exact amount of input token
+    uint256 amountOutMin,   // Minimum output (slippage protection)
+    address[] path,         // Array of token addresses [tokenIn, tokenOut]
+    bool payerIsUser        // true = pull from msg.sender, false = use contract balance
+)
+```
+
+##### 0x09: V2_SWAP_EXACT_OUT
+
+Execute exact output swap on Uniswap V2
+
+**Parameters**:
+```solidity
+abi.encode(
+    address recipient,      // Who receives output tokens
+    uint256 amountOut,      // Exact amount of output token desired
+    uint256 amountInMax,    // Maximum input willing to pay
+    address[] path,         // Array of token addresses
+    bool payerIsUser        // true = pull from msg.sender, false = use contract balance
+)
+```
+
+##### 0x0a: PERMIT2_PERMIT
+
+Single token permit signature verification
+
+**Parameters**:
+```solidity
+abi.encode(
+    IAllowanceTransfer.PermitSingle permitSingle,
+    bytes signature         // User's signature
+)
+
+// PermitSingle structure:
+struct PermitSingle {
+    PermitDetails details;
+    address spender;
+    uint256 sigDeadline;
+}
+```
+
+##### 0x0b: WRAP_ETH
+
+Wrap ETH to WETH
+
+**Parameters**:
+```solidity
+abi.encode(
+    address recipient,      // Who receives WETH
+    uint256 amount          // Amount of ETH to wrap (use CONTRACT_BALANCE for all)
+)
+```
+
+**Special Value**: `amount = type(uint256).max` wraps entire contract balance
+
+##### 0x0c: UNWRAP_WETH
+
+Unwrap WETH to ETH
+
+**Parameters**:
+```solidity
+abi.encode(
+    address recipient,      // Who receives ETH
+    uint256 amountMin       // Minimum amount to unwrap (revert if balance < min)
+)
+```
+
+##### 0x0d: PERMIT2_TRANSFER_FROM_BATCH
+
+Batch transfer multiple tokens via Permit2
+
+**Parameters**:
+```solidity
+abi.encode(
+    IAllowanceTransfer.AllowanceTransferDetails[] batchDetails
+)
+
+// AllowanceTransferDetails structure:
+struct AllowanceTransferDetails {
+    address from;
+    address to;
+    uint160 amount;
+    address token;
+}
+```
+
+##### 0x0e: BALANCE_CHECK_ERC20
+
+Verify an address has minimum token balance
+
+**Parameters**:
+```solidity
+abi.encode(
+    address owner,          // Address to check
+    address token,          // Token to check balance of
+    uint256 minBalance      // Minimum required balance
+)
+```
+
+**Behavior**: Allows revert if used with FLAG_ALLOW_REVERT
+
+#### Group 3: V4 Operations (0x10 - 0x20)
+
+##### 0x10: V4_SWAP ← **This Exercise**
+
+Execute swap on Uniswap V4 pool
+
+**Parameters**:
+```solidity
+abi.encode(
+    bytes actions,          // Packed action IDs (Actions.SWAP_EXACT_IN_SINGLE, etc.)
+    bytes[] params          // Parameters for each action
+)
+```
+
+**Actions for V4_SWAP**:
+```solidity
+// Swap actions
+Actions.SWAP_EXACT_IN_SINGLE    // Single pool exact input
+Actions.SWAP_EXACT_IN           // Multi-hop exact input
+Actions.SWAP_EXACT_OUT_SINGLE   // Single pool exact output
+Actions.SWAP_EXACT_OUT          // Multi-hop exact output
+
+// Settlement actions
+Actions.SETTLE                  // Settle specific amount
+Actions.SETTLE_ALL              // Settle all debt
+Actions.SETTLE_PAIR             // Settle both tokens in pair
+
+// Take actions
+Actions.TAKE                    // Take specific amount
+Actions.TAKE_ALL                // Take all credit
+Actions.TAKE_PAIR               // Take both tokens in pair
+Actions.TAKE_PORTION            // Take percentage of credit
+
+// Combined actions
+Actions.SETTLE_TAKE_PAIR        // Settle and take in one action
+Actions.CLOSE_CURRENCY          // Close out currency position
+Actions.CLEAR_OR_TAKE           // Clear if possible, otherwise take
+Actions.SWEEP                   // Sweep tokens from contract
+```
+
+**Example** (see detailed implementation in main guide):
+```solidity
+bytes memory actions = abi.encodePacked(
+    uint8(Actions.SWAP_EXACT_IN_SINGLE),
+    uint8(Actions.SETTLE_ALL),
+    uint8(Actions.TAKE_ALL)
+);
+
+bytes[] memory params = new bytes[](3);
+params[0] = abi.encode(
+    IV4Router.ExactInputSingleParams({
+        poolKey: poolKey,
+        zeroForOne: true,
+        amountIn: 1e18,
+        amountOutMinimum: 0.95e18,
+        hookData: ""
+    })
+);
+params[1] = abi.encode(currency0, 1e18);        // SETTLE_ALL
+params[2] = abi.encode(currency1, 0.95e18);     // TAKE_ALL
+
+bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));
+bytes[] memory inputs = new bytes[](1);
+inputs[0] = abi.encode(actions, params);
+```
+
+##### 0x11: V3_POSITION_MANAGER_PERMIT
+
+Call permit on V3 NFT Position Manager
+
+**Parameters**: Raw calldata for permit function
+
+**Use Case**: Allow someone to operate on V3 position via signature
+
+##### 0x12: V3_POSITION_MANAGER_CALL
+
+Call any function on V3 NFT Position Manager
+
+**Parameters**: Raw calldata for the function call
+
+**Security**: Validates the caller owns the position being modified
+
+##### 0x13: V4_INITIALIZE_POOL
+
+Initialize a new V4 pool
+
+**Parameters**:
+```solidity
+abi.encode(
+    PoolKey poolKey,        // Pool parameters
+    uint160 sqrtPriceX96    // Initial price
+)
+```
+
+##### 0x14: V4_POSITION_MANAGER_CALL
+
+Call modifyLiquidities on V4 Position Manager
+
+**Parameters**: Raw calldata for modifyLiquidities
+
+**Use Case**: Mint/modify liquidity positions through Universal Router
+
+#### Group 4: Advanced (0x21+)
+
+##### 0x21: EXECUTE_SUB_PLAN
+
+Execute a nested set of commands
+
+**Parameters**:
+```solidity
+abi.encode(
+    bytes commands,         // Nested command bytes
+    bytes[] inputs          // Nested command inputs
+)
+```
+
+**Use Case**: Create reusable command sequences or conditional execution
+
+### Command Flags
+
+Commands can be modified with flags:
+
+```solidity
+// Allow command to revert without failing entire transaction
+bytes1 commandWithFlag = bytes1(uint8(Commands.BALANCE_CHECK_ERC20) | uint8(Commands.FLAG_ALLOW_REVERT));
+
+// Example: Check balance, continue if fails
+bytes memory commands = abi.encodePacked(
+    bytes1(uint8(Commands.BALANCE_CHECK_ERC20) | 0x80),  // With FLAG_ALLOW_REVERT
+    uint8(Commands.V4_SWAP)                               // Continue with swap
+);
+```
+
+**Flags**:
+- `0x80`: FLAG_ALLOW_REVERT - Command can fail without reverting transaction
+- `0x3f`: COMMAND_TYPE_MASK - Mask to extract command type
+
+### Special Address Constants
+
+Used in recipient parameters:
+
+```solidity
+// From ActionConstants
+address constant MSG_SENDER = address(1);      // Resolves to original caller
+address constant ADDRESS_THIS = address(2);    // Resolves to Universal Router
+
+// Example
+bytes memory commands = abi.encodePacked(uint8(Commands.SWEEP));
+bytes[] memory inputs = new bytes[](1);
+inputs[0] = abi.encode(
+    USDC,
+    ActionConstants.MSG_SENDER,  // Send to original caller
+    0
+);
+```
+
+### Command Chaining Example
+
+Execute multiple operations atomically:
+
+```solidity
+// Wrap ETH → Swap on V4 → Unwrap WETH → Sweep to user
+bytes memory commands = abi.encodePacked(
+    uint8(Commands.WRAP_ETH),           // 1. Wrap ETH to WETH
+    uint8(Commands.V4_SWAP),            // 2. Swap WETH for USDC
+    uint8(Commands.UNWRAP_WETH),        // 3. Unwrap any leftover WETH
+    uint8(Commands.SWEEP)               // 4. Sweep USDC to user
+);
+
+bytes[] memory inputs = new bytes[](4);
+// ... encode inputs for each command
+
+router.execute{value: 1 ether}(commands, inputs, deadline);
+```
+
+### V4 Actions Reference (Used within V4_SWAP Command)
+
+When using the `V4_SWAP` command, you specify actions from the V4 Actions library:
+
+#### Swap Actions
+
+| Action | Value | Parameters | Description |
+|--------|-------|------------|-------------|
+| SWAP_EXACT_IN_SINGLE | 0x01 | `ExactInputSingleParams` | Swap exact input in single pool |
+| SWAP_EXACT_IN | 0x02 | `ExactInputParams` | Swap exact input across multiple pools |
+| SWAP_EXACT_OUT_SINGLE | 0x03 | `ExactOutputSingleParams` | Swap for exact output in single pool |
+| SWAP_EXACT_OUT | 0x04 | `ExactOutputParams` | Swap for exact output across multiple pools |
+
+#### Settlement Actions
+
+| Action | Value | Parameters | Description |
+|--------|-------|------------|-------------|
+| SETTLE | 0x09 | `(Currency, uint256 amount, bool payerIsUser)` | Settle exact amount |
+| SETTLE_ALL | 0x10 | `(Currency, uint256 maxAmount)` | Settle all debt up to max |
+| SETTLE_PAIR | 0x11 | `(Currency, Currency)` | Settle both currencies in pair |
+| SETTLE_TAKE_PAIR | 0x12 | `(Currency, Currency)` | Settle and take both in pair |
+
+#### Take Actions
+
+| Action | Value | Parameters | Description |
+|--------|-------|------------|-------------|
+| TAKE | 0x13 | `(Currency, address recipient, uint256 amount)` | Take exact amount |
+| TAKE_ALL | 0x14 | `(Currency, uint256 minAmount)` | Take all credit, at least min |
+| TAKE_PAIR | 0x15 | `(Currency, Currency, address recipient)` | Take both currencies |
+| TAKE_PORTION | 0x16 | `(Currency, address recipient, uint256 bips)` | Take percentage |
+
+#### Utility Actions
+
+| Action | Value | Parameters | Description |
+|--------|-------|------------|-------------|
+| CLOSE_CURRENCY | 0x17 | `(Currency)` | Close out currency (settle debt or take credit) |
+| CLEAR_OR_TAKE | 0x18 | `(Currency, uint256 minAmount)` | Clear if even, take if credit |
+| SWEEP | 0x19 | `(Currency, address recipient)` | Transfer contract balance |
+
+### ExactInputSingleParams Structure
+
+Used with `SWAP_EXACT_IN_SINGLE` action:
+
+```solidity
+struct ExactInputSingleParams {
+    PoolKey poolKey;            // Pool to swap in
+    bool zeroForOne;            // Swap direction
+    uint128 amountIn;           // Exact input amount
+    uint128 amountOutMinimum;   // Minimum output
+    bytes hookData;             // Data for pool's hook
+}
+```
+
+### ExactInputParams Structure
+
+Used with `SWAP_EXACT_IN` multi-hop action:
+
+```solidity
+struct ExactInputParams {
+    Currency currencyIn;        // Input currency
+    PathKey[] path;             // Multi-hop path
+    uint128 amountIn;           // Exact input amount
+    uint128 amountOutMinimum;   // Minimum final output
+}
+
+struct PathKey {
+    Currency intermediateCurrency;
+    uint24 fee;
+    int24 tickSpacing;
+    IHooks hooks;
+    bytes hookData;
+}
+```
+
+## Function Implementation Guide
 
 ### Function: `swap()`
 

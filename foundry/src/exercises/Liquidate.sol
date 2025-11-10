@@ -57,9 +57,24 @@ contract Liquidate is IFlashReceiver {
         PoolKey calldata key
     ) external {
         // Write your code here
+        // Map address(0) to WETH
+        (address v4Token0, address v4Token1) = (key.currency0, key.currency1);
+        if (v4Token0 == address(0)) {
+            v4Token0 = WETH;
+        }
+        require (tokenToRepay == v4Token0 || tokenToRepay == v4Token1   , "Invalid pool");
+
         // Get token amount to liquidate
+        uint256 debt = liquidator.getDebt(tokenToRepay, user);
+
         // Flash loan
+        flash.flash(tokenToRepay, debt, abi.encode(key, user));
+
         // Send profit to msg.sender
+        uint256 balance = IERC20(tokenToRepay).balanceOf(address(this));
+        if (balance > 0) {
+            IERC20(tokenToRepay).transfer(msg.sender, balance);
+        }
     }
 
     function flashCallback(
@@ -69,6 +84,51 @@ contract Liquidate is IFlashReceiver {
         bytes calldata data
     ) external {
         // Write your code here
+        // Decode data
+        (PoolKey memory key, address user) = abi.decode(data, (PoolKey, address));
+
+        // Set currency addresses
+        address v4Token0 = key.currency0 == address(0) ? WETH : key.currency0;
+        address v4Token1 = key.currency1;
+
+        // Determine collateral
+        address collateral = tokenToRepay == v4Token0 ? v4Token1 : v4Token0;
+
+        // Approve borrowed token to liquidator
+        IERC20(tokenToRepay).approve(address(liquidator), amount);
+
+        // Liquidate user
+        liquidator.liquidate(collateral, tokenToRepay, user);
+
+        // Swap collateral to borrowed token
+        uint256 collateralBalance = IERC20(collateral).balanceOf(address(this));
+
+        // Unwrap WETH if needed
+        if (collateral == WETH) {
+            weth.withdraw(collateralBalance);
+        }
+
+        // Perform swap using Universal Router
+        bool zeroForOne = collateral == v4Token0;
+        swap({
+            key: key,
+            amountIn: uint128(collateralBalance),
+            amountOutMin: uint128(amount + fee),
+            zeroForOne: zeroForOne
+        });
+
+        // Repay flash loan
+        uint256 totalRepayment = amount + fee;
+
+        // Wrap ETH to WETH if needed
+        address currencyOut = zeroForOne ? key.currency1 : key.currency0;
+        if (currencyOut == address(0)) {
+            weth.deposit{value: address(this).balance}();
+        }
+
+        uint256 tokenToRepayBalance = IERC20(tokenToRepay).balanceOf(address(this));
+        require(tokenToRepayBalance >= totalRepayment, "Insufficient funds to repay flash loan");
+        IERC20(tokenToRepay).transfer(address(flash), totalRepayment);
     }
 
     function swap(

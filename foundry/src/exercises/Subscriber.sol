@@ -57,10 +57,18 @@ contract Subscriber is ISubscriber, Token {
         onlyPositionManager
     {
         // Write your code here
+        (bytes32 poolId, address owner, uint128 liquidity) = getInfo(tokenId);
+        _mint(poolId, owner, liquidity);
+        poolIds[tokenId] = poolId;
+        ownerOf[tokenId] = owner;
     }
 
     function notifyUnsubscribe(uint256 tokenId) external onlyPositionManager {
         // Write your code here
+        (bytes32 poolId, address owner, uint128 liquidity) = getInfo(tokenId);
+        _burn(poolId, owner, liquidity);
+        delete poolIds[tokenId];
+        delete ownerOf[tokenId];
     }
 
     function notifyBurn(
@@ -71,6 +79,12 @@ contract Subscriber is ISubscriber, Token {
         int256 feesAccrued
     ) external onlyPositionManager {
         // Write your code here
+        //! NOTE: Cannot call getInfo() here because the NFT has already been burned
+        // Use stored data instead
+        bytes32 poolId = poolIds[tokenId];
+        _burn(poolId, owner, liquidity);
+        delete poolIds[tokenId];
+        delete ownerOf[tokenId];
     }
 
     function notifyModifyLiquidity(
@@ -79,6 +93,14 @@ contract Subscriber is ISubscriber, Token {
         int256 feesAccrued
     ) external onlyPositionManager {
         // Write your code here
+        (bytes32 poolId, address owner, uint128 liquidity) = getInfo(tokenId);
+        if (liquidityChange > 0) {
+            _mint(poolId, owner, uint256(liquidityChange));
+        } else {
+            _burn(poolId, owner, uint256(-liquidityChange));
+            delete poolIds[tokenId];
+            delete ownerOf[tokenId];
+        }
     }
 
     function min(uint256 x, uint256 y) private pure returns (uint256) {

@@ -657,26 +657,30 @@ abi.encode(
 **Parameters**:
 ```solidity
 abi.encode(
-    PoolKey key,            // Pool to swap in
-    bool zeroForOne,        // Direction (true = token0→token1)
-    uint128 amountIn,       // Exact input amount
-    uint128 amountOutMinimum, // Min output (slippage)
-    uint160 sqrtPriceLimitX96, // Price limit
-    bytes hookData          // Data for hooks
+    IV4Router.ExactInputSingleParams({
+        poolKey: PoolKey,           // Pool to swap in
+        zeroForOne: bool,           // Direction (true = token0→token1)
+        amountIn: uint128,          // Exact input amount
+        amountOutMinimum: uint128,  // Min output (slippage)
+        hookData: bytes             // Data for hooks
+    })
 )
 ```
 
 **Example**:
 ```solidity
 params[0] = abi.encode(
-    poolKey,
-    true,               // Swap token0 for token1
-    1 ether,            // Input 1 ETH
-    0.95 ether,         // Min output 0.95 token1
-    0,                  // No price limit
-    ""
+    IV4Router.ExactInputSingleParams({
+        poolKey: poolKey,
+        zeroForOne: true,       // Swap token0 for token1
+        amountIn: 1 ether,      // Input 1 ETH
+        amountOutMinimum: 0.95 ether, // Min output 0.95 token1
+        hookData: ""
+    })
 );
 ```
+
+**Note**: This action takes ONE parameter (a struct), not multiple separate parameters.
 
 ---
 
@@ -692,21 +696,32 @@ params[0] = abi.encode(
 **Parameters**:
 ```solidity
 abi.encode(
-    PoolKey[] path,         // Array of pools to route through
-    uint128 amountIn,       // Exact input amount
-    uint128 amountOutMinimum, // Min final output
-    bytes hookData          // Data for hooks
+    IV4Router.ExactInputParams({
+        currencyIn: Currency,       // Input currency
+        path: PathKey[],            // Array of pools to route through
+        amountIn: uint128,          // Exact input amount
+        amountOutMinimum: uint128   // Min final output
+    })
 )
 ```
 
 **Example**: ETH → USDC → DAI
 ```solidity
-PoolKey[] memory path = new PoolKey[](2);
-path[0] = ethUsdcKey;
-path[1] = usdcDaiKey;
+PathKey[] memory path = new PathKey[](2);
+path[0] = PathKey({...}); // ETH → USDC
+path[1] = PathKey({...}); // USDC → DAI
 
-params[0] = abi.encode(path, 1 ether, 990e18, "");
+params[0] = abi.encode(
+    IV4Router.ExactInputParams({
+        currencyIn: Currency.wrap(address(0)), // ETH
+        path: path,
+        amountIn: 1 ether,
+        amountOutMinimum: 990e18
+    })
+);
 ```
+
+**Note**: This action takes ONE parameter (a struct), not multiple separate parameters.
 
 ---
 
@@ -722,26 +737,30 @@ params[0] = abi.encode(path, 1 ether, 990e18, "");
 **Parameters**:
 ```solidity
 abi.encode(
-    PoolKey key,
-    bool zeroForOne,
-    uint128 amountOut,      // Exact output desired
-    uint128 amountInMaximum, // Max input willing to pay
-    uint160 sqrtPriceLimitX96,
-    bytes hookData
+    IV4Router.ExactOutputSingleParams({
+        poolKey: PoolKey,
+        zeroForOne: bool,
+        amountOut: uint128,      // Exact output desired
+        amountInMaximum: uint128, // Max input willing to pay
+        hookData: bytes
+    })
 )
 ```
 
 **Example**:
 ```solidity
 params[0] = abi.encode(
-    poolKey,
-    true,
-    1000e6,             // Want exactly 1000 USDC
-    1.05 ether,         // Pay max 1.05 ETH
-    0,
-    ""
+    IV4Router.ExactOutputSingleParams({
+        poolKey: poolKey,
+        zeroForOne: true,
+        amountOut: 1000e6,       // Want exactly 1000 USDC
+        amountInMaximum: 1.05 ether, // Pay max 1.05 ETH
+        hookData: ""
+    })
 );
 ```
+
+**Note**: This action takes ONE parameter (a struct), not multiple separate parameters.
 
 ---
 
@@ -756,12 +775,16 @@ params[0] = abi.encode(
 **Parameters**:
 ```solidity
 abi.encode(
-    PoolKey[] path,
-    uint128 amountOut,      // Exact final output
-    uint128 amountInMaximum, // Max initial input
-    bytes hookData
+    IV4Router.ExactOutputParams({
+        currencyOut: Currency,      // Output currency
+        path: PathKey[],            // Array of pools to route through
+        amountOut: uint128,         // Exact final output
+        amountInMaximum: uint128    // Max initial input
+    })
 )
 ```
+
+**Note**: This action takes ONE parameter (a struct), not multiple separate parameters.
 
 ---
 
@@ -1327,7 +1350,7 @@ function flexibleIncrease(uint256 tokenId) external payable {
     // If delta > 0: pays ETH
     // If delta < 0: receives ETH
     // If delta == 0: does nothing
-    params[1] = abi.encode(address(0), USDC);
+    params[1] = abi.encode(address(0));
     
     // Action 3: CLOSE_CURRENCY for USDC
     params[2] = abi.encode(USDC);
@@ -1399,12 +1422,13 @@ function swapAndProvideLiquidity() external payable {
     
     // Swap 50% of ETH for USDC
     params[0] = abi.encode(
-        poolKey,
-        true,                           // ETH → USDC
-        address(this).balance / 2,      // Half the ETH
-        0,                              // No minimum (example)
-        0,                              // No price limit
-        ""
+        IV4Router.ExactInputSingleParams({
+            poolKey: poolKey,
+            zeroForOne: true,              // ETH → USDC
+            amountIn: uint128(address(this).balance / 2), // Half the ETH
+            amountOutMinimum: 0,           // No minimum (example only, bad practice!)
+            hookData: ""
+        })
     );
     
     // Mint position with resulting balances
@@ -1552,8 +1576,8 @@ params[1] = abi.encode(address(0), USDC);
 // Behavior: Automatically settles if positive delta, takes if negative
 // When: Delta could be either direction
 
-params[1] = abi.encode(address(0), USDC);  // ETH
-params[2] = abi.encode(USDC);               // USDC
+params[1] = abi.encode(address(0));  // ETH
+params[2] = abi.encode(USDC);        // USDC
 // PoolManager will:
 // - If delta > 0: you pay (settle)
 // - If delta < 0: you receive (take)
@@ -1966,21 +1990,15 @@ params[0] = abi.encode(
 
 **Step 4: Encode First CLOSE_CURRENCY (ETH)**
 ```solidity
-params[1] = abi.encode(address(0), USDC);
-```
-
-**Wait, what?** This encodes BOTH currencies for the first CLOSE_CURRENCY. It's a special encoding for pairs.
-
-**Alternative (more explicit)**:
-```solidity
 params[1] = abi.encode(address(0));  // Close ETH
-params[2] = abi.encode(USDC);        // Close USDC
 ```
 
 **Step 5: Encode Second CLOSE_CURRENCY (USDC)**
 ```solidity
-params[2] = abi.encode(USDC);
+params[2] = abi.encode(USDC);  // Close USDC
 ```
+
+**Important**: Each CLOSE_CURRENCY action takes only ONE parameter (the currency address), not two.
 
 **Step 6: Encode SWEEP**
 ```solidity
@@ -2022,7 +2040,7 @@ function increaseLiquidity(
     );
 
     // CLOSE_CURRENCY params - currency 0
-    params[1] = abi.encode(address(0), USDC);
+    params[1] = abi.encode(address(0));
 
     // CLOSE_CURRENCY params - currency 1
     params[2] = abi.encode(USDC);

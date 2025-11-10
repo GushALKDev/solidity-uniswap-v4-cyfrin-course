@@ -51,10 +51,95 @@ contract SwapV3ToV4 {
             : (v4.key.currency1, v4.key.currency0);
 
         // Write your code here
+        // Transfer tokenIn from msg.sender to UniversalRouter
+        IERC20(v3.tokenIn).transferFrom(msg.sender, address(router), v3.amountIn);
 
         // UniversalRouter commands and inputs
         bytes memory commands;
         bytes[] memory inputs;
+
+        // Insert UNWRAP_WETH if v3.tokenOut is WETH
+        if (v3.tokenOut == WETH) {
+            commands = abi.encodePacked(
+                uint8(Commands.V3_SWAP_EXACT_IN),
+                uint8(Commands.UNWRAP_WETH),
+                uint8(Commands.V4_SWAP)
+            );
+        } else {
+            commands = abi.encodePacked(
+                uint8(Commands.V3_SWAP_EXACT_IN),
+                uint8(Commands.V4_SWAP)
+            );
+        }
+
+        // input length = number of commands
+        inputs = new bytes[](commands.length);
+
+        // V3_SWAP_EXACT_IN
+        inputs[0] = abi.encode(
+            // address recipient
+            address(router),
+            // uint256 amountIn - use v3.tokenIn balance locked in UniversalRouter contract
+            ActionConstants.CONTRACT_BALANCE,
+            // uint256 amountOutMin
+            uint256(1),
+            // bytes path
+            abi.encodePacked(v3.tokenIn, v3.poolFee, v3.tokenOut),
+            // bool payerIsUser - pay from tokens locked in UniversalRouter contract
+            false
+        );
+
+        // UNWRAP_WETH
+        if (v3.tokenOut == WETH) {
+            inputs[1] = abi.encode(
+                // Recipient
+                address(router),
+                // Min amount
+                uint256(1)
+            );
+        }
+
+        // V4 actions and params
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.SETTLE),
+            uint8(Actions.SWAP_EXACT_IN_SINGLE),
+            uint8(Actions.TAKE_ALL)
+        );
+
+        bytes[] memory params = new bytes[](3);
+
+        // SETTLE (currency, amount, payer is user)
+        params[0] = abi.encode(
+            v4CurrencyIn,
+            uint256(ActionConstants.CONTRACT_BALANCE),
+            false
+        );
+
+        // SWAP_EXACT_IN_SINGLE
+        params[1] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: v4.key,
+                zeroForOne: v3.tokenOut == v4Token0,
+                amountIn: ActionConstants.OPEN_DELTA,
+                amountOutMinimum: v4.amountOutMin,
+                hookData: bytes("")
+            })
+        );
+
+        // TAKE_ALL (currency, min amount)
+        params[2] = abi.encode(
+            v4CurrencyOut, 
+            uint256(v4.amountOutMin)
+        );
+
+        // Set the inputs for the UniversalRouter
+        inputs[inputs.length - 1] = abi.encode(actions, params);
+
+        // Execute the swap via UniversalRouter
+        router.execute(commands, inputs, block.timestamp);
+
+        // Withdraw v4CurrencyOut to msg.sender
+        withdraw(v4CurrencyOut, msg.sender);
     }
 
     function withdraw(address currency, address receiver) private {
